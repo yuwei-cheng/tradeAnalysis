@@ -205,3 +205,12 @@ data %>% subset(contract_type == "4 Next Season") %>%
   subset(vol == min(vol))
 
 # Spread analysis
+
+# Regression
+current_week$weekday = weekdays(current_week$date)
+test = dummy_cols(current_week$weekday)[-c(1,5)]
+colnames(test) = c("Mon","Tue","Wed","Thu","Sat","Sun")
+current_week = cbind(current_week, test)
+
+model = lm(vol ~ Mon + Tue + Wed + Thu + Sat + Sun, data = current_week)
+summary(model)

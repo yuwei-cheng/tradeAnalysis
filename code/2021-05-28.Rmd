@@ -1,5 +1,5 @@
 ---
-title: "OKEX Data Analysis"
+title: "OKEX BTC Hourly Data Analysis"
 author: "Yuwei Cheng"
 date: "Created on 2021-05-24. Updated on `r Sys.Date()`."
 output:
@@ -32,10 +32,13 @@ suppressMessages(library(lubridate))
 suppressMessages(library(ggplot2))
 suppressMessages(library(tidyr))
 suppressMessages(library(scales))
+suppressMessages(library(ggpubr))
+suppressMessages(library(fastDummies))
 #library(forecast)
 #library(tseries)
 suppressMessages(library(zoo))
 ```
+
 
 ```{r}
 # Split different types of contract
@@ -62,15 +65,20 @@ makedf = function(x,y)
 
 returnDist = function(x, t1, t2)
 {
-  print(paste0("Premium distribution prior ", t1))
-  print(signif(quantile(x$return[x$trade_time<t1], 
-                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1)), 3))
-  print(paste0("Premium distribution between ", t1, " and ", t2))
-  print(signif(quantile(x$return[x$trade_time>t1 & x$trade_time<t2], 
-                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1)), 3))
-  print(paste0("Premium distribution after ", t2))
-  print(signif(quantile(x$return[x$trade_time>t2], 
-                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1)), 3))
+  a = quantile(x$return[x$trade_time<t1], 
+                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1))
+  b = quantile(x$return[x$trade_time>t1 & x$trade_time<t2], 
+                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1))
+  c = quantile(x$return[x$trade_time>t2], 
+                        c(0, 0.025, 0.25, 0.5, 0.75, 0.975, 1))
+  # print(paste0("Premium distribution prior ", t1))
+  # print(signif(a, 3))
+  # print(paste0("Premium distribution between ", t1, " and ", t2))
+  # print(signif(b, 3))
+  # print(paste0("Premium distribution after ", t2))
+  # print(signif(c, 3))
+  
+  return(rbind(a,b,c))
 }
 
 returnPlot = function(x,t1,t2)
@@ -83,7 +91,122 @@ returnPlot = function(x,t1,t2)
   par(mfrow = c(1,1))
 }
 
+#' @name coumputeIRR
+#' @param r percentage premium
+#' @param contract type of contract，当周，次周，当季，次季
+#' @note 
+#'      [1]compute the lower bound of the annual rate of return
+#'      [2]do not include service charge
+#'      [3]IRR was computed by assuming that we close position at the delivery
+#'         time and prices converge to 0
+#-------------------------------------------------------------------------------
+computeIRR = function(r, contract)
+{
+  if(contract == "Current Week")
+  {
+    return((1+r)^floor(365/7)-1)
+  }else if(contract == "Next Week")
+  {
+    return((1+r)^floor(365/14)-1)
+  }else if(contract == "Current Season")
+  {
+    return((1+r)^floor(365/93)-1)
+  }else
+  {
+    return((1+r)^floor(365/186)-1)
+  }
+}
+
+descriptiveAnalysis = function(x, t1, t2, threshold1, threshold2, contract)
+{
+  r = returnDist(x, t1, t2)
+  
+  p1 = x %>% ggplot() +
+    geom_line(aes(x = trade_time, y = return),
+              color = "steelblue") + theme_bw() +
+    geom_vline(xintercept = c(t1, t2),
+               linetype = "dotted",color = "red")+
+    scale_x_datetime(breaks = date_breaks("1 month"),
+                     date_labels = "%b-%d"
+                     # minor_breaks = date_breaks("1 day")
+                     )+
+    labs(x = NULL, title = NULL, y = "premium (%)")
+  
+  t1 = x %>% subset(return < threshold1) %>% 
+    select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
+    rename("futures close price" = "close.x") %>%
+    rename("swap close price" = "close.y") %>%
+    rename("futures vol" = "vol.x") %>%
+    rename("swap vol" = "vol.y")
+  
+  t2 = x %>% subset(return < threshold2) %>% 
+    select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
+    rename("futures close price" = "close.x") %>%
+    rename("swap close price" = "close.y") %>%
+    rename("futures vol" = "vol.x") %>%
+    rename("swap vol" = "vol.y")
+  
+  irr = apply(r[,4:7], 1, function(y){computeIRR(y, contract)})
+  colnames(irr) = c("2020年11月前",
+                    "2020年11月-2021年4月15号",
+                    "2021年4月15号之后")
+ return(list(
+   r = r,
+   p1 = p1,
+   t1 = t1,
+   t2 = t2,
+   irr = irr
+ )) 
+}
+
+volumePlot = function(y)
+{
+ p = y %>% group_by(date) %>%
+   summarize(sum = sum(vol)) %>% 
+   ggplot() + geom_line(aes(x = date, y = sum), color = "steelblue") + 
+   theme_bw() +
+   scale_y_log10(
+     breaks = trans_breaks("log10", function(x) 10^x),
+     labels = trans_format("log10", math_format(10^.x))) +
+   geom_vline(xintercept = y$date[weekdays(y$date) == "星期五"],
+              color = "red", linetype = "dotted") +
+   # geom_vline(xintercept = y$date[weekdays(y$date) == "星期一"],
+   #            color = "green", linetype = "dotted") +
+   scale_x_date(date_breaks = "1 month", date_label = "%b-%d") +
+   labs(x = NULL, y = "date volume")
+ return(p)
+}
+
+volatilityPlot = function(y)
+{
+   p = y %>% group_by(date) %>%
+   summarize(volatility = sd(close), u = mean(close)) %>% 
+   ggplot() + geom_line(aes(x = date, y = volatility/u), color = "steelblue") + 
+   theme_bw() +
+   # scale_y_log10(
+   #   breaks = trans_breaks("log10", function(x) 10^x),
+   #   labels = trans_format("log10", math_format(10^.x)),
+   #   limits = c(10^3, 10^8)) +
+   # geom_vline(xintercept = y$date[weekdays(y$date) == "星期五"],
+   #            color = "red", linetype = "dotted") +
+   # geom_vline(xintercept = y$date[weekdays(y$date) == "星期一"],
+   #            color = "green", linetype = "dotted") +
+   scale_x_date(date_breaks = "1 month", date_label = "%b-%d") +
+   labs(x = NULL, y = "date volatility")
+ return(p)
+}
+
+volumeAnalysis = function(x)
+{
+  x$weekday = weekdays(x$date)
+  y = dummy_cols(x$weekday)[-c(1,5)]
+  colnames(y) = c("Mon","Tue","Wed","Thu","Sat","Sun")
+  x = cbind(x, y)
+  model = lm(vol ~ Mon + Tue + Wed + Thu + Sat + Sun, data = x)
+  return(model)
+}
 ```
+
 
 ```{r}
 data = read.csv("C:/Users/yuwei/guyi Dropbox/Yuwei Cheng/TG RESEARCH's shared workspace/tradeAnalysis/data/BTC/btc_usdt_60min_all.csv")
@@ -120,6 +243,7 @@ data = data %>%
 data$date = as.Date(data$trade_time)
 ```
 
+
 ```{r}
 current_week  = splitCon(data, "1 Current Week")
 next_week = splitCon(data, "2 Next Week")
@@ -152,193 +276,133 @@ $premium (\%) = \frac{P_{futures} - P_{swap}}{P_{swap}}$
 价格最高低了三个百分点。这个机会出现在2021年2月23号下午两点。永续合约的交易量极低
 只有1830。当然这个也有可能是错误数据。
 
-反套溢价百分比小于前三的机会总共就只出现了12次
+反套溢价百分比小于千三的机会总共就只出现了12次
 
+## 年化收益率
 
-```{r}
-# 溢价分布
+中基的年化收益在6%，Q3的年化收益在18%
 
-returnDist(df1, df1$trade_time[820], df1$trade_time[4046])
-
-df1 %>% ggplot() +
-  geom_line(aes(x = trade_time, y = return)) + theme_bw() +
-  geom_vline(xintercept = df1$trade_time[c(820, 4046)],
-             linetype = "dotted",
-             color = "red")+
-  scale_x_datetime(breaks = date_breaks("2 month"),
-                   minor_breaks = date_breaks("7 day"))+
-  labs(x = NULL, title = "当周合约和永续合约的价差", y = "premium (%)")
-
-# 反套小于百一
-
-df1 %>% subset(return < -0.01) %>% 
-  select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
-  rename("futures close price" = "close.x") %>%
-  rename("swap close price" = "close.y") %>%
-  rename("futures vol" = "vol.x") %>%
-  rename("swap vol" = "vol.y")
-
-# 反套小于千三
-
-df1 %>% subset(return < -0.003) %>% 
-  select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
-  rename("futures close price" = "close.x") %>%
-  rename("swap close price" = "close.y") %>%
-  rename("futures vol" = "vol.x") %>%
-  rename("swap vol" = "vol.y")
-```
 ## 成交量分析
-我算了每天当周合约的总成交量。有意思的是，周五往往是每周成交量最少的一天。
+
+周五往往是每周成交量最少的一天。每天的成交量大多在在10万到一百万之间。从今年一月
+份开始daily price volatility很大,差不多是每日均价的3%
 
 ```{r}
-current_week %>%
-  group_by(date) %>%
-  summarize(sum = sum(vol)) %>% 
-  ggplot() + geom_line(aes(x = date, y = sum)) + theme_bw() +
-  # scale_y_continuous(limits = c(5,8))+
-  scale_y_log10(
-    breaks = trans_breaks("log10", function(x) 10^x),
-    labels = trans_format("log10", math_format(10^.x)),
-    limits = c(10^3, 10^8)
-  ) +
-  geom_vline(xintercept = current_week$date[weekdays(current_week$date) == "星期五"],
-             color = "red", linetype = "dotted") +
-  # geom_vline(xintercept = vol$date[weekdays(vol$date) == "星期三"],
-  #            color = "blue", linetype = "dotted") +
-  geom_vline(xintercept = current_week$date[weekdays(current_week$date) == "星期一"],
-             color = "green", linetype = "dotted") +
-  scale_x_date(date_breaks = "1 month", date_label = "%b-%d") +
-  labs(x = NULL, y = "date volume")
+result1 = descriptiveAnalysis(df1, 
+                              df1$trade_time[820],
+                              df1$trade_time[4046],
+                              -0.01,
+                              -0.003,
+                              "Current Week")
+result1$t1
+result1$t2
+signif(result1$irr, 2)
+
+p1 = result1$p1 
+p2 = volumePlot(current_week) 
+p3 = volatilityPlot(current_week)
+
+ggarrange(p1,p3,p2,nrow = 3)
+
+summary(volumeAnalysis(current_week))
 ```
 
 
-## 次周合约和永续合约的溢价分析
+## 次周合约和永续合约
 
 2020年11月之前，溢价百分比的中位数在千二左右，Q3在千三左右，最高溢价百分比在千六。
 2020年11月之后到2021年4月中之前，溢价百分比的中位数在千七左右，Q3在百一左右，最高溢价百分比百三。
 2021年4月中之后，溢价百分比的中位数在千四左右，Q3在千六左右，最高溢价百分比百一点五。
 
-正套的机会2021年4月中以后还是存在的，因为Q3的差别不是很大。
+
+反套溢价百分比小于前三的机会总共就只出现了6次
+
+## 年化收益率
+
+中基的年化收益在11%，Q3的年化收益在17%
+
+## 成交量分析
+
+周五往往是每周成交量最多的一天。每天的成交量大多在在30万到三百万之间。从今年一月
+份开始daily price volatility很大，差不多是每日均价的3%
 
 ```{r}
-returnDist(df2, df1$trade_time[820], df1$trade_time[4046])
+result2 = descriptiveAnalysis(df2, 
+                              df1$trade_time[820],
+                              df1$trade_time[4046],
+                              -0.01,
+                              -0.003,
+                              "Next Week")
+result2$r[,4:7]
+result2$t1
+result2$t2
+signif(result2$irr, 2)
 
-df2 %>% ggplot() +
-  geom_line(aes(x = trade_time, y = return)) + theme_bw() +
-  geom_vline(xintercept = df1$trade_time[c(820,4046)],
-             linetype = "dotted",
-             color = "red")+
-  scale_x_datetime(breaks = date_breaks("2 month"),
-                   minor_breaks = date_breaks("14 day"))+
-  labs(x = NULL, title = "次周合约和永续合约", y = "premium (%)")
+p1 = result2$p1 
+p2 = volumePlot(next_week) 
+p3 = volatilityPlot(next_week)
 
-df2 %>% subset(return < -0.01) %>% 
-  select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
-  rename("futures close price" = "close.x") %>%
-  rename("swap close price" = "close.y") %>%
-  rename("futures vol" = "vol.x") %>%
-  rename("swap vol" = "vol.y")
+ggarrange(p1,p3,p2,nrow = 3)
+summary(volumeAnalysis(next_week))
+```
+
+## 当季合约和永续合约
+
+2020年11月之前，溢价百分比的中位数在百1.5左右，Q3在百2左右，最高溢价百分比在百2.5。
+2020年11月之后到2021年4月中之前，溢价百分比的中位数在百3.5左右，Q3在百一左右，最高溢价百分比百八。
+2021年4月中之后，溢价百分比的中位数在百3左右，Q3在百四左右，最高溢价百分比百七。
+
+
+反套溢价百分比小于前三的机会总共就只出现了6次
+
+## 年化收益率
+
+中基的年化收益在11%，Q3的年化收益在17%
+
+## 成交量分析
+
+周五往往是每周成交量最多的一天。每天的成交量大多在在30万到三百万之间。从今年一月
+份开始daily price volatility很大，差不多是每日均价的3%
+
+```{r}
+result3 = descriptiveAnalysis(df3, 
+                              df1$trade_time[820],
+                              df1$trade_time[4046],
+                              -0.01,
+                              -0.003,
+                              "Current Season")
+
+signif(result3$r[,4:7],2)
+result3$t1
+result3$t2
+signif(result3$irr, 2)
+
+p1 = result3$p1
+p2 = volumePlot(current_season)
+p3 = volatilityPlot(current_season)
+
+ggarrange(p1,p3,p2,nrow = 3)
+summary(volumeAnalysis(current_season))
 ```
 
 
 ```{r}
-returnDist(df3, df1$trade_time[820], df1$trade_time[4046])
+result4 = descriptiveAnalysis(df4, 
+                              df1$trade_time[820],
+                              df1$trade_time[4046],
+                              -0.00,
+                              -0.001,
+                              "Next Season")
+signif(result4$r[,4:7])
+result4$t1
+result4$t2
+signif(result4$irr, 2)
 
-df3 %>% ggplot() +
-  geom_line(aes(x = trade_time, y = return)) + theme_bw() +
-  geom_vline(xintercept = df1$trade_time[c(820,4046)],
-             linetype = "dotted",
-             color = "red")+
-  scale_x_datetime(breaks = date_breaks("2 month"),
-                   minor_breaks = date_breaks("1 month")) +
-  labs(x = NULL, title = "当季合约和永续合约", y = "premium (%)")
+p1 = result4$p1
+p2 = volumePlot(next_season)
+p3 = volatilityPlot(next_season)
 
-df3 %>% subset(return < -0.01) %>% 
-  select(trade_time, close.x, vol.x, close.y, vol.y, diff, return) %>%
-  rename("futures close price" = "close.x") %>%
-  rename("swap close price" = "close.y") %>%
-  rename("futures vol" = "vol.x") %>%
-  rename("swap vol" = "vol.y")
+ggarrange(p1,p3,p2,nrow = 3)
+
+summary(volumeAnalysis(next_season))
 ```
-
-
-
-```{r}
-df4 %>% ggplot() +
-  geom_line(aes(x = trade_time, y = return)) + theme_bw() +
-  geom_vline(xintercept = df1$trade_time[c(820, 4046)],
-             linetype = "dotted",
-             color = "red")+
-  scale_x_datetime(breaks = date_breaks("2 month"),
-                   minor_breaks = date_breaks("1 month")) +
-  labs(x = NULL, title = "次季合约和永续合约")
-```
-
-
-```{r}
-returnDist(df4, df1$trade_time[820], df1$trade_time[4046])
-returnPlot(df4, df1$trade_time[820], df1$trade_time[4046])
-```
-
-```{r}
-# data = read.csv("C:/Users/yuwei/TG RESEARCH Dropbox/历史数据/priceAnalysis/data/BTC/btc_usdt_60min_all.csv")
-# data = data %>% select(-X, - exchange, - ts_code, -freq, -is_contract) %>%
-#   mutate(trade_time = ymd_hms(trade_time))
-
-# data$contract_type = do.call(rbind,
-#         str_split(data$symbol, "-", n = Inf, simplify = FALSE))[,3]
-# 
-# # Classify contract type
-# data =
-# data %>% mutate(contract_type =  ifelse(contract_type != "SWAP",
-#                                         contract_type, "180101")) %>%
-#   mutate(type = ymd(contract_type)) %>%
-#   mutate(date = as.Date(trade_time)) %>%
-#   mutate(difference = type - date) %>%
-#   mutate(contract_type  =
-#            ifelse(difference <0, "SWAP",
-#                   ifelse(difference >= 90, "4 Next Season",
-#                          ifelse(difference >=14, "3 Current Season",
-#                                 ifelse(difference >= 7, "2 Next Week",
-#                                        "1 Current Week")))))%>%
-#   select(-difference, -date, -type)
-
-# Price
-data %>%
-  ggplot() +
-  geom_line(aes(x = trade_time, y=close, colour = contract_type)) +
-  theme_bw() + labs(x = "Trade Time", y = "BTC Close Price",
-                    colour = "Type")+
-  scale_x_datetime(date_labels = "%b-%d", breaks = "2 month") +
-  scale_y_continuous(breaks = seq(10000, 80000, 10000)) +
-  # scale_color_viridis(discrete = TRUE, option = "D")
-  scale_color_manual(values=c("#999999", "#E69F00",
-                              "#56B4E9", "#d62828", "#003566"))
-# Volume
-data %>%
-  ggplot() + facet_wrap(~ contract_type) +
-  geom_line(aes(x = trade_time, y = log(vol)),color = "steelblue") +
-  theme_bw() + labs(x = "Trade Time", y = "BTC vol in log scale",
-                    colour = "Type")+
-  scale_x_datetime(date_labels = "%b-%d", breaks = "2 month")
-
-```
-
-```{r}
-# Identify days which has extremely low volume
-data %>% subset(contract_type == "SWAP") %>%
-  subset(vol == min(vol))
-
-data %>% subset(contract_type == "1 Current Week") %>%
-  subset(vol == min(vol))
-
-data %>% subset(contract_type == "2 Next Week") %>%
-  subset(vol == min(vol))
-
-data %>% subset(contract_type == "3 Current Season") %>%
-  subset(vol == min(vol))
-
-data %>% subset(contract_type == "4 Next Season") %>%
-  subset(vol == min(vol))
-```
-
